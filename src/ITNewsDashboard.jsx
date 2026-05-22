@@ -91,11 +91,14 @@ export default function ITNewsDashboard() {
     .filter((a) => activeCategory === "all" || a.categories?.includes(activeCategory))
     .filter((a) => !searchQuery || a.title?.toLowerCase().includes(searchQuery.toLowerCase()) || a.summary?.toLowerCase().includes(searchQuery.toLowerCase()));
 
+  const [error, setError] = useState(null);
+
   async function fetchNews() {
     if (loading) return;
     if (!apiKey) { setShowSettings(true); return; }
     setLoading(true);
     setLoadingMsg("Scanning sources...");
+    setError(null);
 
     const sourceList = enabledSources.map((s) => `- ${s.name} (${s.url}) [${s.type}] categories: ${s.categories.join(", ")}`).join("\n");
     const today = new Date().toLocaleDateString("en-US", { weekday: "long", year: "numeric", month: "long", day: "numeric" });
@@ -104,10 +107,15 @@ export default function ITNewsDashboard() {
       setLoadingMsg("Gathering latest headlines...");
       const resp = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json", "x-api-key": apiKey, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
-          max_tokens: 4000,
+          max_tokens: 16000,
           tools: [{ type: "web_search_20250305", name: "web_search" }],
           messages: [
             {
@@ -118,27 +126,49 @@ export default function ITNewsDashboard() {
         }),
       });
 
+      if (!resp.ok) {
+        const errData = await resp.json().catch(() => ({}));
+        const errMsg = errData?.error?.message || `API returned ${resp.status} ${resp.statusText}`;
+        throw new Error(errMsg);
+      }
+
       setLoadingMsg("Distilling insights...");
       const data = await resp.json();
 
+      // Check for API-level errors in the response
+      if (data.type === "error") {
+        throw new Error(data.error?.message || "Unknown API error");
+      }
+
       const textParts = data.content?.filter((b) => b.type === "text").map((b) => b.text).join("") || "";
       const cleaned = textParts.replace(/```json|```/g, "").trim();
+
+      if (!cleaned) {
+        throw new Error("No text content in API response. The model may still be processing web searches. Try again in a moment.");
+      }
 
       let parsed = [];
       try {
         parsed = JSON.parse(cleaned);
       } catch {
         const match = cleaned.match(/\[[\s\S]*\]/);
-        if (match) parsed = JSON.parse(match[0]);
+        if (match) {
+          parsed = JSON.parse(match[0]);
+        } else {
+          throw new Error("Could not parse response as JSON. Raw response: " + cleaned.substring(0, 200));
+        }
       }
 
       if (Array.isArray(parsed) && parsed.length > 0) {
         const withIds = parsed.map((a, i) => ({ ...a, id: `art-${Date.now()}-${i}` }));
         setArticles(withIds);
         setLastFetch(new Date().toISOString());
+      } else {
+        throw new Error("API returned an empty article list. Try refreshing again.");
       }
     } catch (err) {
       console.error("Fetch failed:", err);
+      setError(err.message || "An unknown error occurred.");
     } finally {
       setLoading(false);
       setLoadingMsg("");
@@ -247,7 +277,17 @@ export default function ITNewsDashboard() {
       <main style={S.main}>
         {view === "feed" && !selectedArticle && (
           <>
-            {articles.length === 0 && !loading && (
+            {error && (
+              <div style={S.errorBanner}>
+                <div style={S.errorHeader}>
+                  <span style={S.errorIcon}>⚠</span>
+                  <strong>Feed refresh failed</strong>
+                  <button style={S.errorClose} onClick={() => setError(null)}>×</button>
+                </div>
+                <p style={S.errorText}>{error}</p>
+              </div>
+            )}
+            {articles.length === 0 && !loading && !error && (
               <div style={S.empty}>
                 <div style={S.emptyIcon}>⬡</div>
                 <h3 style={S.emptyTitle}>No articles yet</h3>
@@ -541,4 +581,10 @@ const S = {
   // Settings modal
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, backdropFilter: "blur(4px)" },
   modalCard: { background: "#111116", border: "1px solid #1a1a22", borderRadius: 12, padding: 32, maxWidth: 460, width: "90%", boxShadow: "0 20px 60px rgba(0,0,0,0.5)" },
+  // Error banner
+  errorBanner: { background: "rgba(232,69,60,0.08)", border: "1px solid rgba(232,69,60,0.3)", borderRadius: 10, padding: "16px 20px", marginBottom: 20 },
+  errorHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 6, color: "#e8453c", fontFamily: "'JetBrains Mono', monospace", fontSize: 13 },
+  errorIcon: { fontSize: 16 },
+  errorClose: { marginLeft: "auto", background: "none", border: "none", color: "#e8453c", cursor: "pointer", fontSize: 18, padding: 0 },
+  errorText: { fontSize: 13, color: "#cc8880", lineHeight: 1.5, fontFamily: "'JetBrains Mono', monospace", fontSize: 11, wordBreak: "break-word" },
 };
